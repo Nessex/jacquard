@@ -56,7 +56,7 @@ impl ThreadPool {
         })
     }
 
-    pub fn submit<F>(&self, task: F)
+    pub fn spawn<F>(&self, task: F)
         where
             F: 'static + FnOnce() + Send,
     {
@@ -83,18 +83,40 @@ impl Drop for ThreadPool {
 mod tests {
     use crate::ThreadPool;
     use std::io::Write;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+    use rayon::prelude::*;
 
     #[test]
-    fn it_works() {
+    fn time_jacquard() {
+        let start = Instant::now();
         let tp = ThreadPool::new();
         let t = std::thread::current().id();
-        for _ in 0..100_000 {
-            tp.submit(move || {
+        for _ in 0..1_000_000 {
+            tp.spawn(move || {
                 let thread_id = std::thread::current().id();
 
                 assert_ne!(t, thread_id);
             });
         }
+        drop(tp);
+        println!("jcq: {}ms", start.elapsed().as_millis());
+    }
+
+    #[test]
+    fn time_rayon() {
+        let start = Instant::now();
+        let tp = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let t = std::thread::current().id();
+        tp.scope(|s| {
+            for _ in 0..1_000_000 {
+                s.spawn(move |_| {
+                    let thread_id = std::thread::current().id();
+
+                    assert_ne!(t, thread_id);
+                });
+            }
+        });
+        drop(tp);
+        println!("rayon: {}ms", start.elapsed().as_millis());
     }
 }
