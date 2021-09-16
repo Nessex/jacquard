@@ -2,21 +2,23 @@ use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crossbeam_channel::{Sender, Receiver};
 use std::sync::Arc;
+use std::marker::PhantomData;
 
 #[derive(Debug)]
 pub enum ThreadPoolError {
     SpawnError,
 }
 
-pub struct ThreadPool
+pub struct ThreadPool<'scope>
 {
     done: Arc<AtomicBool>,
     work_queue_sender: Sender<Box<dyn 'static + FnOnce() + Send>>,
     work_queue_receiver: Receiver<Box<dyn 'static + FnOnce() + Send>>,
     handles: Vec<JoinHandle<()>>,
+    _phantom: PhantomData<&'scope ()>,
 }
 
-impl ThreadPool {
+impl<'scope> ThreadPool<'scope> {
     pub fn new() -> Self {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let mut s = Self {
@@ -24,6 +26,7 @@ impl ThreadPool {
             work_queue_sender: sender,
             work_queue_receiver: receiver,
             handles: Vec::new(),
+            _phantom: PhantomData::default(),
         };
 
         s.run();
@@ -58,9 +61,13 @@ impl ThreadPool {
 
     pub fn spawn<F>(&self, task: F) -> Result<(), ThreadPoolError>
     where
-        F: 'static + FnOnce() + Send,
+        F: 'scope + FnOnce() + Send,
     {
-        self.work_queue_sender.send(Box::new(task))
+        let task = unsafe {
+            std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Box<dyn FnOnce() + Send + 'static>>(Box::new(task))
+        };
+
+        self.work_queue_sender.send(task)
             .map_err(|_| ThreadPoolError::SpawnError)
     }
 
@@ -71,7 +78,7 @@ impl ThreadPool {
     }
 }
 
-impl Drop for ThreadPool {
+impl Drop for ThreadPool<'_> {
     fn drop(&mut self) {
         self.done.fetch_or(true, Ordering::Release);
         self.join_all();
