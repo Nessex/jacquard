@@ -1,20 +1,28 @@
-use std::sync::{Mutex, Arc};
-use std::collections::VecDeque;
 use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crossbeam_channel::{Sender, Receiver};
+use std::sync::Arc;
+
+#[derive(Debug)]
+pub enum ThreadPoolError {
+    SpawnError,
+}
 
 pub struct ThreadPool
 {
     done: Arc<AtomicBool>,
-    work_queue: Arc<Mutex<VecDeque<Box<dyn 'static + FnOnce() + Send>>>>,
+    work_queue_sender: Sender<Box<dyn 'static + FnOnce() + Send>>,
+    work_queue_receiver: Receiver<Box<dyn 'static + FnOnce() + Send>>,
     handles: Vec<JoinHandle<()>>,
 }
 
 impl ThreadPool {
     pub fn new() -> Self {
+        let (sender, receiver) = crossbeam_channel::unbounded();
         let mut s = Self {
             done: Arc::new(AtomicBool::new(false)),
-            work_queue: Arc::new(Mutex::new(VecDeque::new())),
+            work_queue_sender: sender,
+            work_queue_receiver: receiver,
             handles: Vec::new(),
         };
 
@@ -31,21 +39,13 @@ impl ThreadPool {
 
     fn run_thread(&self) -> JoinHandle<()> {
         let done = self.done.clone();
-        let work_queue = self.work_queue.clone();
+        let receiver = self.work_queue_receiver.clone();
 
         std::thread::spawn(move || {
             loop {
-                let mut g = match work_queue.try_lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        continue;
-                    },
-                };
+                let task = receiver.try_recv();
 
-                let task = g.pop_front();
-                drop(g);
-
-                if let Some(task) = task {
+                if let Ok(task) = task {
                     task();
                 } else if done.load(Ordering::Acquire) {
                     break;
@@ -56,13 +56,12 @@ impl ThreadPool {
         })
     }
 
-    pub fn spawn<F>(&self, task: F)
-        where
-            F: 'static + FnOnce() + Send,
+    pub fn spawn<F>(&self, task: F) -> Result<(), ThreadPoolError>
+    where
+        F: 'static + FnOnce() + Send,
     {
-        let mut q = self.work_queue.lock().unwrap();
-
-        q.push_back(Box::new(task));
+        self.work_queue_sender.send(Box::new(task))
+            .map_err(|_| ThreadPoolError::SpawnError)
     }
 
     fn join_all(&mut self) {
@@ -82,9 +81,7 @@ impl Drop for ThreadPool {
 #[cfg(test)]
 mod tests {
     use crate::ThreadPool;
-    use std::io::Write;
-    use std::time::{Duration, Instant};
-    use rayon::prelude::*;
+    use std::time::Instant;
 
     #[test]
     fn time_jacquard() {
@@ -96,7 +93,7 @@ mod tests {
                 let thread_id = std::thread::current().id();
 
                 assert_ne!(t, thread_id);
-            });
+            }).unwrap();
         }
         drop(tp);
         println!("jcq: {}ms", start.elapsed().as_millis());
