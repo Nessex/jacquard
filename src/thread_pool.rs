@@ -64,6 +64,9 @@ impl<'scope> ThreadPool<'scope> {
         F: 'scope + FnOnce() + Send,
     {
         let task = unsafe {
+            // Safety: All tasks in the pool will be executed before returning from each thread.
+            // and all threads will be joined before fully dropping ThreadPool to ensure
+            // that all tasks have been run to completion.
             std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Box<dyn FnOnce() + Send + 'static>>(Box::new(task))
         };
 
