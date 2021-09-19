@@ -1,5 +1,5 @@
 use std::thread::JoinHandle;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicUsize};
 use crossbeam_channel::{Sender, Receiver};
 use std::sync::Arc;
 use std::marker::PhantomData;
@@ -20,6 +20,7 @@ pub struct ThreadPool<'scope>
 
 pub struct ThreadPoolScope<'sscope, 'tpscope> {
     pool: &'tpscope ThreadPool<'tpscope>,
+    queued_jobs: AtomicUsize,
     _phantom: PhantomData<&'sscope ()>,
 }
 
@@ -85,7 +86,8 @@ impl<'scope> ThreadPool<'scope> {
     {
         closure(&ThreadPoolScope {
             pool: self,
-            _phantom: Default::default(),
+            queued_jobs: Default::default(),
+            _phantom: Default::default()
         })
     }
 
@@ -102,21 +104,35 @@ impl<'scope> ThreadPool<'scope> {
     }
 }
 
+impl Drop for ThreadPool<'_> {
+    fn drop(&mut self) {
+        self.done.fetch_or(true, Ordering::Release);
+        self.join_all();
+    }
+}
+
 impl<'sscope, 'tpscope> ThreadPoolScope<'sscope, 'tpscope> {
     pub fn spawn<F>(&self, task: F) -> Result<(), ThreadPoolError>
         where
             F: 'sscope + 'tpscope + FnOnce(&ThreadPoolScope) + Send,
     {
         let scope = self;
+        self.queued_jobs.fetch_add(1, Ordering::AcqRel);
         self.pool.spawn(move || {
-            task(scope)
+            task(scope);
+            self.queued_jobs.fetch_sub(1, Ordering::AcqRel);
         })
+    }
+
+    fn join_all(&self) {
+        while self.queued_jobs.load(Ordering::Acquire) != 0 {
+            std::thread::yield_now();
+        }
     }
 }
 
-impl Drop for ThreadPool<'_> {
+impl<'sscope, 'tpscope> Drop for ThreadPoolScope<'sscope, 'tpscope> {
     fn drop(&mut self) {
-        self.done.fetch_or(true, Ordering::Release);
         self.join_all();
     }
 }
