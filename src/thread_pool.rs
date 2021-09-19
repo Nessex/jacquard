@@ -18,6 +18,11 @@ pub struct ThreadPool<'scope>
     _phantom: PhantomData<&'scope ()>,
 }
 
+pub struct ThreadPoolScope<'sscope, 'tpscope> {
+    pool: &'tpscope ThreadPool<'tpscope>,
+    _phantom: PhantomData<&'sscope ()>,
+}
+
 impl<'scope> ThreadPool<'scope> {
     pub fn new() -> Self {
         let (sender, receiver) = crossbeam_channel::unbounded();
@@ -74,10 +79,38 @@ impl<'scope> ThreadPool<'scope> {
             .map_err(|_| ThreadPoolError::SpawnError)
     }
 
+    pub fn scope<'sscope, F>(&self, closure: F)
+    where
+        F: 'sscope + 'scope + FnOnce(&ThreadPoolScope) + Send,
+    {
+        closure(&ThreadPoolScope {
+            pool: self,
+            _phantom: Default::default(),
+        })
+    }
+
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub fn queue_len(&self) -> usize {
+        self.work_queue_receiver.len()
+    }
+
     fn join_all(&mut self) {
         for h in self.handles.drain(..) {
             h.join().unwrap();
         }
+    }
+}
+
+impl<'sscope, 'tpscope> ThreadPoolScope<'sscope, 'tpscope> {
+    pub fn spawn<F>(&self, task: F) -> Result<(), ThreadPoolError>
+        where
+            F: 'sscope + 'tpscope + FnOnce(&ThreadPoolScope) + Send,
+    {
+        let scope = self;
+        self.pool.spawn(move || {
+            task(scope)
+        })
     }
 }
 
@@ -125,5 +158,34 @@ mod tests {
         });
         drop(tp);
         println!("rayon: {}ms", start.elapsed().as_millis());
+    }
+
+    #[test]
+    fn test_scope() {
+        let tp = ThreadPool::new();
+        let t = std::thread::current().id();
+        tp.scope(|s| {
+            for _ in 0..500_000 {
+                s.spawn(move |_| {
+                    let thread_id = std::thread::current().id();
+
+                    assert_ne!(t, thread_id);
+                }).unwrap();
+            }
+        });
+
+        assert_eq!(tp.queue_len(), 0);
+
+        tp.scope(|s| {
+            for _ in 0..500_000 {
+                s.spawn(move |_| {
+                    let thread_id = std::thread::current().id();
+
+                    assert_ne!(t, thread_id);
+                }).unwrap();
+            }
+        });
+
+        drop(tp);
     }
 }
